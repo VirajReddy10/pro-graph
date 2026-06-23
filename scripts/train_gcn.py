@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 from torch_geometric.utils import negative_sampling
 
-from data.loader import load_yeast_graph, split_graph_for_link_prediction
+from data.loader import load_yeast_graph_structural, split_graph_for_link_prediction
 from models.gcn import GCNEncoder, decode
 
 HIDDEN_CHANNELS = 64
@@ -74,14 +74,14 @@ def main():
     torch.manual_seed(SEED)
 
     print("Loading Yeast PPI graph...")
-    data = load_yeast_graph()
+    data = load_yeast_graph_structural()
     train_data, val_data, test_data = split_graph_for_link_prediction(data, seed=SEED)
 
     print(f"  Train supervision edges: {train_data.edge_label_index.size(1)}")
     print(f"  Val edges (pos+neg): {val_data.edge_label_index.size(1)}")
     print(f"  Test edges (pos+neg): {test_data.edge_label_index.size(1)}")
 
-    model = GCNEncoder(in_channels=1, hidden_channels=HIDDEN_CHANNELS, out_channels=OUT_CHANNELS)
+    model = GCNEncoder(in_channels=4, hidden_channels=HIDDEN_CHANNELS, out_channels=OUT_CHANNELS)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     print()

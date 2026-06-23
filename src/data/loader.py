@@ -52,6 +52,63 @@ def load_yeast_graph() -> Data:
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
     return data
 
+def load_yeast_graph_structural() -> Data:
+    """
+    Load the Yeast PPI network with richer structural features
+    (degree, clustering coefficient, PageRank, betweenness centrality)
+    instead of just degree.
+    """
+    mat = sio.loadmat(YEAST_MAT_PATH)
+    adjacency = mat["net"].tocoo()
+
+    edge_index = torch.tensor(
+        np.vstack([adjacency.row, adjacency.col]),
+        dtype=torch.long,
+    )
+    num_nodes = adjacency.shape[0]
+
+    x = compute_structural_features(adjacency)
+
+    data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
+    return data
+
+
+import networkx as nx
+
+
+def compute_structural_features(adjacency) -> torch.Tensor:
+    """
+    Compute richer structural node features beyond simple degree:
+    clustering coefficient, PageRank, and betweenness centrality.
+
+    Each feature is z-score normalized independently before being
+    combined into a single [num_nodes, 4] feature matrix (degree +
+    the three new features).
+    """
+    graph = nx.from_scipy_sparse_array(adjacency)
+
+    num_nodes = adjacency.shape[0]
+
+    degree = torch.tensor([d for _, d in graph.degree()], dtype=torch.float)
+    clustering = torch.tensor([nx.clustering(graph, n) for n in range(num_nodes)], dtype=torch.float)
+    pagerank_dict = nx.pagerank(graph)
+    pagerank = torch.tensor([pagerank_dict[n] for n in range(num_nodes)], dtype=torch.float)
+    betweenness_dict = nx.betweenness_centrality(graph)
+    betweenness = torch.tensor([betweenness_dict[n] for n in range(num_nodes)], dtype=torch.float)
+
+    def normalize(t):
+        return (t - t.mean()) / t.std()
+
+    features = torch.stack([
+        normalize(degree),
+        normalize(clustering),
+        normalize(pagerank),
+        normalize(betweenness),
+    ], dim=1)
+
+    return features
+
+
 from torch_geometric.transforms import RandomLinkSplit
 
 
