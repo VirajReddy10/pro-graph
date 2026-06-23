@@ -42,7 +42,12 @@ def load_yeast_graph() -> Data:
     degree = torch.zeros(num_nodes, dtype=torch.float)
     for node in adjacency.row:
         degree[node] += 1
-    x = degree.unsqueeze(1)  # shape [num_nodes, 1]
+
+    # Normalize: raw degree counts (1 to 118, heavily right-skewed) cause
+    # exploding magnitudes through GCN's message passing, which saturates
+    # the sigmoid decoder and breaks gradient flow during training.
+    degree_normalized = (degree - degree.mean()) / degree.std()
+    x = degree_normalized.unsqueeze(1)  # shape [num_nodes, 1]
 
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
     return data
