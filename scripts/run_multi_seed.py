@@ -1,8 +1,11 @@
 """
-Train a GAT for link prediction on the Yeast PPI network.
+Run GCN and GAT training across multiple seeds to get a statistically
+meaningful comparison (mean +/- std test AUC), rather than relying on
+a single run, given observed run-to-run variance from non-deterministic
+negative sampling and dropout.
 
 Usage:
-    python scripts/train_gat.py
+    python scripts/run_multi_seed.py
 """
 
 import sys
@@ -10,48 +13,42 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 from torch_geometric.utils import negative_sampling
 
 from data.loader import load_yeast_graph_structural, split_graph_for_link_prediction
+from models.gcn import GCNEncoder, decode
 from models.gat import GATEncoder
-from models.gcn import decode
 
 HIDDEN_CHANNELS = 64
 OUT_CHANNELS = 32
 HEADS = 4
 LEARNING_RATE = 0.01
-NUM_EPOCHS = 300
-SEED = 42
+SEEDS = [42, 43, 44, 45, 46]
 
 
 def train_one_epoch(model, optimizer, train_data):
     model.train()
     optimizer.zero_grad()
-
     z = model(train_data.x, train_data.edge_index)
-
     pos_edge_index = train_data.edge_label_index
     neg_edge_index = negative_sampling(
         edge_index=train_data.edge_index,
         num_nodes=train_data.num_nodes,
         num_neg_samples=pos_edge_index.size(1),
     )
-
     edge_label_index = torch.cat([pos_edge_index, neg_edge_index], dim=1)
     edge_label = torch.cat([
         torch.ones(pos_edge_index.size(1)),
         torch.zeros(neg_edge_index.size(1)),
     ])
-
     scores = decode(z, edge_label_index)
     loss = F.binary_cross_entropy_with_logits(scores, edge_label)
-
     loss.backward()
     optimizer.step()
-
     return loss.item()
 
 
@@ -61,42 +58,49 @@ def evaluate(model, data):
     z = model(data.x, data.edge_index)
     scores = decode(z, data.edge_label_index)
     probs = torch.sigmoid(scores)
-    auc = roc_auc_score(data.edge_label.cpu().numpy(), probs.cpu().numpy())
-    return auc
+    return roc_auc_score(data.edge_label.cpu().numpy(), probs.cpu().numpy())
 
 
-def main():
-    torch.manual_seed(SEED)
-    print("Loading Yeast PPI graph...")
+def run_one(model_name: str, seed: int, num_epochs: int) -> float:
+    torch.manual_seed(seed)
     data = load_yeast_graph_structural()
-    train_data, val_data, test_data = split_graph_for_link_prediction(data, seed=SEED)
-    print(f"  Train supervision edges: {train_data.edge_label_index.size(1)}")
-    print(f"  Val edges (pos+neg): {val_data.edge_label_index.size(1)}")
-    print(f"  Test edges (pos+neg): {test_data.edge_label_index.size(1)}")
+    train_data, val_data, test_data = split_graph_for_link_prediction(data, seed=seed)
 
-    model = GATEncoder(in_channels=4, hidden_channels=HIDDEN_CHANNELS, out_channels=OUT_CHANNELS, heads=HEADS)
+    if model_name == "GCN":
+        model = GCNEncoder(in_channels=4, hidden_channels=HIDDEN_CHANNELS, out_channels=OUT_CHANNELS)
+    else:
+        model = GATEncoder(in_channels=4, hidden_channels=HIDDEN_CHANNELS, out_channels=OUT_CHANNELS, heads=HEADS)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    print()
-    print("Training...")
     best_val_auc = 0.0
     best_state = None
-    for epoch in range(1, NUM_EPOCHS + 1):
-        loss = train_one_epoch(model, optimizer, train_data)
-        if epoch % 10 == 0 or epoch == 1:
+    for epoch in range(1, num_epochs + 1):
+        train_one_epoch(model, optimizer, train_data)
+        if epoch % 10 == 0:
             val_auc = evaluate(model, val_data)
-            print(f"  Epoch {epoch:3d} | loss: {loss:.4f} | val AUC: {val_auc:.4f}")
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-    print()
-    print(f"Best val AUC: {best_val_auc:.4f}")
     model.load_state_dict(best_state)
-    test_auc = evaluate(model, test_data)
-    print(f"Test AUC (best model): {test_auc:.4f}")
-    torch.save(model.state_dict(), "models/gat_yeast.pt")
-    print("Model saved to models/gat_yeast.pt")
+    return evaluate(model, test_data)
+
+
+def main():
+    results = {"GCN": [], "GAT": []}
+
+    for seed in SEEDS:
+        gcn_auc = run_one("GCN", seed, num_epochs=100)
+        gat_auc = run_one("GAT", seed, num_epochs=300)
+        results["GCN"].append(gcn_auc)
+        results["GAT"].append(gat_auc)
+        print(f"Seed {seed}: GCN={gcn_auc:.4f}  GAT={gat_auc:.4f}")
+
+    print()
+    for model_name, aucs in results.items():
+        aucs = np.array(aucs)
+        print(f"{model_name}: mean={aucs.mean():.4f}  std={aucs.std():.4f}  (runs: {[round(a, 4) for a in aucs]})")
 
 
 if __name__ == "__main__":
